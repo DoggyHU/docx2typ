@@ -1,0 +1,17 @@
+# Build artifacts
+scripts/docx2typ/bin/
+scripts/docx2typ/obj/
+
+# NuGet packages
+scripts/docx2typ/packages/
+
+# IDE
+.vs/
+.vscode/
+*.suo
+*.user
+*.sln.docstates
+
+# OS
+.DS_Store
+Thumbs.db
