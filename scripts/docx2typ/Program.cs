@@ -30,7 +30,7 @@ foreach (var para in body.Elements<Paragraph>())
 {
     var spacing = para.ParagraphProperties?.SpacingBetweenLines;
     if (spacing?.Line?.Value != null && spacing.LineRule?.Value == LineSpacingRuleValues.Auto)
-        lineValues.Add(spacing.Line.Value);
+        lineValues.Add(int.Parse(spacing.Line.Value));
 }
 // 默认 1.5 倍（360/240），兼容无行距信息或行距信息不全的文档
 double lineMult = 1.5;
@@ -189,20 +189,70 @@ foreach (var element in body.Elements())
         string? headingLevel = null;
         string headingText = text;
 
-        if (styleId == "1" || (styleId != "af0" && Regex.Match(text, @"^[一二三四五六七八九十]、").Success))
+        // 先检测文本模式，再检查 styleId，避免 af0 自定义样式挡住标题识别
+        bool isHeadingText = false;
+        int headingTextLevel = 0;
+
+        if (Regex.Match(text, @"^[一二三四五六七八九十]、").Success)
         {
-            headingLevel = "section";
+            isHeadingText = true;
+            headingTextLevel = 1;
+        }
+        else if (Regex.Match(text, @"^（[一二三四五六七八九十]）").Success)
+        {
+            isHeadingText = true;
+            headingTextLevel = 2;
+        }
+        else if (Regex.Match(text, @"^[\(（]\d+[\)）]").Success)
+        {
+            // (1)、（2）、(3) 等 → Level 4（====）
+            isHeadingText = true;
+            headingTextLevel = 4;
+        }
+        else if (Regex.Match(text, @"^[①②③④⑤⑥⑦⑧⑨⑩⑪⑫]").Success)
+        {
+            // ①、②、③ 等 → Level 5（=====）
+            isHeadingText = true;
+            headingTextLevel = 5;
+        }
+        else if (Regex.Match(text, @"^\d{1,2}[．\.、]").Success)
+        {
+            // 1.、2．、3、等 → Level 3（===）
+            // 仅匹配 1-2 位数字，避免匹配长篇编号列表
+            isHeadingText = true;
+            headingTextLevel = 3;
+        }
+
+        // styleId 优先级高于文本，但 af0 不阻挡文本模式
+        if (styleId == "1" || styleId == "2" || styleId == "4")
+        {
+            int sid = int.Parse(styleId);
+            headingLevel = sid switch
+            {
+                1 => "section",
+                2 => "subsection",
+                4 => "subsubsection",
+                _ => null
+            };
+            headingText = text;
+        }
+        else if (isHeadingText)
+        {
+            headingLevel = headingTextLevel switch
+            {
+                1 => "section",
+                2 => "subsection",
+                3 => "subsubsection",
+                4 => "paragraph",
+                5 => "subparagraph",
+                _ => null
+            };
+            // 去除前缀编号（如 "一、", "（一）", "1." 等）
             headingText = Regex.Replace(text, @"^[一二三四五六七八九十]、\s*", "");
-        }
-        else if (styleId == "2" || Regex.Match(text, @"^（[一二三四五六七八九十]）").Success)
-        {
-            headingLevel = "subsection";
-            headingText = Regex.Replace(text, @"^（[一二三四五六七八九十]）\s*", "");
-        }
-        else if (styleId == "4" || Regex.Match(text, @"^\d+[．\.、]").Success)
-        {
-            headingLevel = "subsubsection";
-            headingText = Regex.Replace(text, @"^\d+[．\.、]\s*", "");
+            headingText = Regex.Replace(headingText, @"^（[一二三四五六七八九十]）\s*", "");
+            headingText = Regex.Replace(headingText, @"^[\(（]\d+[\)）]\s*", "");
+            headingText = Regex.Replace(headingText, @"^[①②③④⑤⑥⑦⑧⑨⑩⑪⑫]\s*", "");
+            headingText = Regex.Replace(headingText, @"^\d{1,2}[．\.、]\s*", "");
         }
 
         if (styleId == "af0" && text == "前言") { headingLevel = "section"; headingText = "前言"; inToc = false; }
@@ -485,6 +535,16 @@ foreach (var (type, content) in blocks)
             bodyTyp.AppendLine();
             break;
 
+        case "paragraph":
+            bodyTyp.AppendLine($"==== {EscapeTypst(content)}");
+            bodyTyp.AppendLine();
+            break;
+
+        case "subparagraph":
+            bodyTyp.AppendLine($"===== {EscapeTypst(content)}");
+            bodyTyp.AppendLine();
+            break;
+
         case "para":
             bodyTyp.AppendLine(EscapeTypst(content));
             bodyTyp.AppendLine();
@@ -572,6 +632,16 @@ foreach (var (type, content) in blocks)
             var bodyCells = new List<string>();
             int cellCount = 0;
 
+            // 预检：如果存在同时有 colspan 和 rowspan 的单元格，此表可能在 Typst 中发生列定位错位
+            // （WPS 在垂直合并单元格全部标记 restart 导致转换器多算行高，产生冲突），整表去 rowspan 保编译
+            bool anyDualSpan = allRows.Any(r => r.Any(c => c.cs > 1 && c.rs > 1));
+            if (anyDualSpan)
+                Console.WriteLine($"  ⚠ 表 {tableCounter + 1}: 存在 colspan+rowspan 复合单元格，已自动去掉行高");
+
+            // 预计算每行在给定 pos 下是否超出列宽（含 rowspan 等复杂情况会导致转换器的 pos 与 Typst 不一致）
+            // 用逐格推进 + 限幅方式处理
+            bool hadClip = false;
+
             for (int ri = 0; ri < allRows.Count; ri++)
             {
                 int pos = 0;
@@ -589,11 +659,19 @@ foreach (var (type, content) in blocks)
                         continue;
                     }
 
-                    if (cs > 1 || rs > 1)
+                    bool flat = anyDualSpan;
+                    int outCs = flat ? 1 : Math.Min(cs, colCount - pos);
+                    if (outCs < 1) outCs = 1;
+                    int outRs = flat ? 1 : rs;
+                    int advanceSpan = flat ? 1 : outCs;
+
+                    if (outCs < cs) hadClip = true;
+
+                    if (outCs > 1 || outRs > 1)
                     {
                         var cellArgs = new List<string>();
-                        if (cs > 1) cellArgs.Add($"colspan: {cs}");
-                        if (rs > 1) cellArgs.Add($"rowspan: {rs}");
+                        if (outCs > 1) cellArgs.Add($"colspan: {outCs}");
+                        if (outRs > 1) cellArgs.Add($"rowspan: {outRs}");
                         if (ri < headerRows)
                             headerCells.Add($"table.cell({string.Join(", ", cellArgs)})[{FormatCellTypst(text)}]");
                         else
@@ -607,10 +685,12 @@ foreach (var (type, content) in blocks)
                             bodyCells.Add($"[{FormatCellTypst(text)}]");
                     }
                     cellCount++;
-                    pos += span;
+                    pos += advanceSpan;
                 }
             }
 
+            if (hadClip)
+                Console.WriteLine($"  ⚠ 表 {tableCounter + 1}: 部分 colspan 超出列宽已裁切");
             tableCounter++;
             bodyTyp.AppendLine("#figure(");
 
@@ -696,8 +776,8 @@ string EscapeTypst(string text)
 
 string FormatCellTypst(string text)
 {
-    // text is already EscapeTypst'd; Typst handles digit wrapping natively
-    return text;
+    // text is already EscapeTypst'd; also escape _ for content mode (emphasis marker)
+    return text.Replace("_", "\\_");
 }
 
 // ── 写 main.typ（格式规则 + 内容一体化） ──
@@ -739,7 +819,8 @@ string typPreambleBefore = @"// ── 页面设置 ──
 }
 #show heading.where(level: 4): it => {
   set text(font: (""SimSun"",), size: 12pt, weight: ""bold"")
-  it"
+  it
+}";
 string typLineSpacing = $"	// ── 行距（等效Word {lineMult}倍行距）──\n\t#set par(leading: {lineMult}em, spacing: {lineMult}em)\n\n";
 string typPreambleAfter = @"
 // ── 图表规则 ──
