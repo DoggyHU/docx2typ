@@ -134,6 +134,36 @@ def main():
         for c in high:
             print(f"  L{c['line']:4d}: {c['text'][:70]}")
 
+    # ── Step 4: Embed table images ──
+    print(f"\n{'='*60}")
+    print("Step 4/5: Embed images into table cells (embed_table_images)")
+    print("=" * 60)
+    EMBED = os.path.join(os.path.dirname(__file__), "embed_table_images.py")
+    if os.path.exists(EMBED):
+        result = subprocess.run(
+            ["python", EMBED, f"--docx={docx_path}", f"--typ={main_typ}"],
+            env=env,
+        )
+        if result.returncode != 0:
+            print("WARNING: embed_table_images had errors")
+    else:
+        print(f"  SKIPPED: embed_table_images.py not found")
+
+    # ── Step 5: Cleanup ──
+    print(f"\n{'='*60}")
+    print("Step 5/5: Final cleanup (cleanup_typ)")
+    print("=" * 60)
+    CLEANUP = os.path.join(os.path.dirname(__file__), "cleanup_typ.py")
+    if os.path.exists(CLEANUP):
+        result = subprocess.run(
+            ["python", CLEANUP, main_typ],
+            env=env,
+        )
+        if result.returncode != 0:
+            print("WARNING: cleanup_typ had errors")
+    else:
+        print(f"  SKIPPED: cleanup_typ.py not found")
+
     # ── Summary ──
     print(f"\n{'='*60}")
     print("Conversion complete!")
